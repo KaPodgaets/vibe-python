@@ -9,7 +9,8 @@ dependencies = [
     "pyautogui",
     "SQLAlchemy",
     "pyodbc",
-    "rich"
+    "rich",
+    "APScheduler"
 ]
 
 [project.scripts]

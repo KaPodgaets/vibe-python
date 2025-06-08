@@ -74,4 +74,10 @@ class DataAccessLayer:
             task_run_id=task_run_id, level=level, message=message, screenshot_path=screenshot_path
         )
         with self.get_session() as session:
-            session.add(new_log) 
+            session.add(new_log)
+
+    def get_next_pending_task(self) -> Optional[TaskRun]:
+        """Retrieves the oldest 'Pending' task run from the database."""
+        with self.get_session() as session:
+            task = session.query(TaskRun).filter(TaskRun.status == 'Pending').order_by(TaskRun.created_at).first()
+            return task 
