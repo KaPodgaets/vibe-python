@@ -1,0 +1,908 @@
+diff --git a/architecture/app/ARCH-cli-orchestrator-v1.md b/architecture/app/ARCH-cli-orchestrator-v1.md
+new file mode 100644
+index 0000000..f98108c
+--- /dev/null
++++ b/architecture/app/ARCH-cli-orchestrator-v1.md
+@@ -0,0 +1,41 @@
++---
++id: ARCH-cli-orchestrator
++title: "CLI and Orchestrator"
++type: component
++layer: presentation
++owner: @vibe-team
++version: v1
++status: current
++created: 2025-06-08
++updated: 2025-06-08
++tags: [cli, orchestrator, service]
++depends_on: [ARCH-scheduler, ARCH-executor, ARCH-dal, ARCH-config-manager]
++referenced_by: []
++---
++## Context
++This component serves as the main entry point and user interface for the RPA orchestration application. It provides a Command Line Interface (CLI) for manual control, status checks, and service management. It also contains the main orchestration loop that drives the entire application when running as a service.
++
++## Structure
++*   **Primary File:** `src/vibe_python/main.py`
++*   **Framework:** `Typer` is used for building the CLI.
++*   **Key Responsibilities:**
++    *   Initializing all other core components (Configuration Manager, DAL, Executor, Scheduler).
++    *   Defining CLI commands such as `start-service`, `restart-service`, `run-now`, `status`, `list-robots`, and `rerun`.
++    *   For the `start-service` command, it initiates the scheduler and then enters a persistent worker loop that calls the Executor to process tasks from the database queue.
++    *   Manages the process ID (`.pid`) file for service control.
++
++## Behavior
++*   **User Interaction:** Users interact with the system primarily through the commands defined in this component. For example, `vibe-python run-now <robot_name>` will trigger an immediate task run.
++*   **Service Orchestration:** The `start-service` command runs a loop that:
++    1.  Starts the `Scheduler` to queue jobs based on their cron schedules.
++    2.  Continuously polls the database (via the `DAL`) for `Pending` tasks.
++    3.  Passes any found tasks to the `Executor` for processing.
++*   **Dependencies:** It coordinates all other major components, acting as the central nervous system of the application. It relies on the `Configuration Manager` to know which robots exist, the `DAL` to interact with the task queue, the `Scheduler` to manage time-based jobs, and the `Executor` to run the robots.
++
++## Evolution
++### Planned
++*   No major changes are planned for the core orchestration logic, but new CLI commands may be added as features are developed.
++
++### Historical
++*   **v1:** Initial design based on the greenfield project plan. Defines core service management and user-facing commands.
+diff --git a/architecture/app/ARCH-config-manager-v1.md b/architecture/app/ARCH-config-manager-v1.md
+new file mode 100644
+index 0000000..f920235
+--- /dev/null
++++ b/architecture/app/ARCH-config-manager-v1.md
+@@ -0,0 +1,38 @@
++---
++id: ARCH-config-manager
++title: "Configuration Manager"
++type: component
++layer: application
++owner: @vibe-team
++version: v1
++status: current
++created: 2025-06-08
++updated: 2025-06-08
++tags: [configuration, json, pydantic]
++depends_on: [ARCH-data-models]
++referenced_by: []
++---
++## Context
++The Configuration Manager is responsible for loading, validating, and providing access to all external configurations required by the application. This centralization ensures that configuration logic is not scattered throughout the codebase.
++
++## Structure
++*   **Primary File:** `src/vibe_python/config.py`
++*   **Key Responsibilities:**
++    *   **Environment Variables:** Loads the `.env` file to retrieve sensitive data like database connection strings and email credentials.
++    *   **Robot Definitions:** Scans the `configs/robots.d/` directory for all `*.json` files.
++    *   **Validation:** Uses Pydantic models (defined in `ARCH-data-models`) to parse and validate the structure and data types of each robot configuration file. This prevents malformed configurations from crashing the application at runtime.
++    *   **Consolidation:** Aggregates all valid robot configurations into a single, easily accessible in-memory data structure for other components to use.
++    *   **Error Handling:** Raises a clear error on startup if duplicate `robot_name` values are found across different configuration files.
++
++## Behavior
++*   On application startup, the Orchestrator initializes the Configuration Manager.
++*   The manager loads all configurations into memory. If any validation fails, the application startup is halted with an error message.
++*   Other components, like the `Scheduler` and `Executor`, request configuration data (e.g., a specific robot's schedule or action list) from the Configuration Manager.
++*   The configuration is loaded once at startup. A service restart is required to apply any changes made to the configuration files.
++
++## Evolution
++### Planned
++*   No immediate changes are planned. Future enhancements might include support for hot-reloading configurations without a service restart.
++
++### Historical
++*   **v1:** Initial design. Supports loading from a `.env` file and a `configs/robots.d/` directory. Includes robust validation using Pydantic.
+diff --git a/architecture/app/ARCH-data-models-v1.md b/architecture/app/ARCH-data-models-v1.md
+new file mode 100644
+index 0000000..c5762c9
+--- /dev/null
++++ b/architecture/app/ARCH-data-models-v1.md
+@@ -0,0 +1,60 @@
++---
++id: ARCH-data-models
++title: "Application Data Models"
++type: data_model
++layer: domain
++owner: @vibe-team
++version: v1
++status: current
++created: 2025-06-08
++updated: 2025-06-08
++tags: [pydantic, sqlalchemy, schema]
++depends_on: []
++referenced_by: []
++---
++## Context
++This document defines the core data structures for the application, including configuration file schemas and database table schemas. These models ensure data consistency and validation across the system. They are intended to be centralized in `src/vibe_python/models.py`.
++
++## Structure
++
++### Configuration Models (Pydantic)
++These models define the expected structure of the robot `.json` files.
++
++**`Robot` Model:**
++```json
++{
++  "robot_name": "string (unique)",
++  "description": "string",
++  "enabled": "boolean",
++  "schedule": {
++    "type": "string ('cron')",
++    "expression": "string (cron expression)"
++  },
++  "on_failure": {
++    "retries": "integer (e.g., 2)",
++    "delay_seconds": "integer (e.g., 300)"
++  },
++  "actions": "[Action]"
++}
++```
++**`Action` Model:**
++*   `type`: (e.g., `click`, `write`, `move_to`, `screenshot`)
++*   `params`: A dictionary of parameters specific to the action type.
++*   `description`: A human-readable string.
++
++### Database Models (SQLAlchemy)
++These models define the database schema for persisting operational data in MS SQL Server.
++
++**`TaskRuns` Table:**
++*   `id` (PK, int, auto-increment)
++*   `robot_name` (varchar)
++*   `status` (varchar: 'Pending', 'Running', 'Success', 'Failed')
++*   `retry_count` (int, default 0)
++*   `created_at`, `started_at`, `completed_at` (datetime)
++*   `result_message` (varchar)
++
++**`LogEntries` Table:**
++*   `id` (PK, int, auto-increment)
++*   `task_run_id` (FK to TaskRuns.id)
++*   `timestamp` (datetime)
++*   `level` (varchar: 'INFO', 'WARN', 'ERROR')
++*   `message` (varchar)
++*   `screenshot_path` (varchar, nullable)
++
++## Behavior
++*   Pydantic models are used by the `Configuration Manager` to validate robot JSON files upon loading.
++*   SQLAlchemy models are used by the `Data Access Layer (DAL)` to perform all database operations (CRUD).
++
++## Evolution
++### Historical
++*   **v1:** Initial design incorporating robot configuration, task run state, logging, and the `on_failure` retry mechanism.
+diff --git a/architecture/app/ARCH-executor-v1.md b/architecture/app/ARCH-executor-v1.md
+new file mode 100644
+index 0000000..88b498f
+--- /dev/null
++++ b/architecture/app/ARCH-executor-v1.md
+@@ -0,0 +1,43 @@
++---
++id: ARCH-executor
++title: "Executor / Robot Engine"
++type: component
++layer: application
++owner: @vibe-team
++version: v1
++status: current
++created: 2025-06-08
++updated: 2025-06-08
++tags: [worker, rpa, pyautogui, retry]
++depends_on: [ARCH-config-manager, ARCH-dal, ARCH-notifier]
++referenced_by: []
++---
++## Context
++The Executor is the core worker component of the application. It is responsible for picking up a pending task from the queue and executing the sequence of RPA actions defined in the corresponding robot's configuration.
++
++## Structure
++*   **Primary File:** `src/vibe_python/executor.py`
++*   **Key RPA Library:** `pyautogui`
++*   **Key Responsibilities:**
++    *   Processes one task at a time in a single-threaded manner to avoid conflicts with GUI interactions.
++    *   Translates the declarative list of actions (e.g., `{"type": "click", ...}`) into imperative calls to the `pyautogui` library.
++    *   Manages the lifecycle of a task run, updating its status in the database from `Pending` to `Running`, and finally to `Success` or `Failed`.
++    *   Implements a session keep-alive mechanism (e.g., a periodic, non-disruptive mouse move) to prevent the RDP session from locking during long periods of inactivity between tasks.
++
++## Behavior
++*   **Task Execution:** The main orchestrator loop passes a `TaskRun` object to the executor.
++*   **Retry Logic:** The executor reads the `on_failure` policy from the robot's configuration. It wraps the entire action sequence execution in a retry loop.
++    1.  If an action fails, the attempt is logged, the `retry_count` in the database is incremented (via the `DAL`), and the executor waits for the specified `delay_seconds`.
++    2.  This repeats until the task succeeds or the number of retries is exhausted.
++*   **Failure Handling:** If a task fails on its final attempt, the executor:
++    1.  Takes a screenshot of the desktop for debugging.
++    2.  Logs a detailed error message to the database.
++    3.  Calls the `Notifier` to send an email alert.
++    4.  Sets the task's final status to `Failed`.
++
++## Evolution
++### Planned
++*   The action execution logic could be refactored to use a Strategy Pattern to allow for different RPA backends in the future (e.g., Selenium for web automation).
++
++### Historical
++*   **v1:** Initial design. Includes core action execution, robust retry/failure logic, and session keep-alive.
+diff --git a/architecture/app/ARCH-scheduler-v1.md b/architecture/app/ARCH-scheduler-v1.md
+new file mode 100644
+index 0000000..f5c352a
+--- /dev/null
++++ b/architecture/app/ARCH-scheduler-v1.md
+@@ -0,0 +1,31 @@
++---
++id: ARCH-scheduler
++title: "Task Scheduler"
++type: component
++layer: application
++owner: @vibe-team
++version: v1
++status: current
++created: 2025-06-08
++updated: 2025-06-08
++tags: [scheduler, cron, apscheduler]
++depends_on: [ARCH-config-manager, ARCH-dal]
++referenced_by: []
++---
++## Context
++The Task Scheduler is responsible for automatically queueing robot tasks based on their defined schedules. It ensures that robots are run at their configured times without manual intervention.
++
++## Structure
++*   **Primary File:** `src/vibe_python/scheduler.py`
++*   **Framework:** `APScheduler`
++*   **Key Responsibilities:**
++    *   On application startup, it reads all robot configurations via the `Configuration Manager`.
++    *   For each `enabled` robot with a `schedule` defined, it adds a job to the `APScheduler` instance.
++    *   The scheduled job's only responsibility is to create a new task entry in the `TaskRuns` table with a status of `Pending` by calling a method on the `Data Access Layer (DAL)`.
++
++## Behavior
++*   The scheduler is decoupled from the `Executor`. Its role is strictly to add tasks to the queue at the correct time. The main orchestration loop is responsible for picking up these queued tasks and passing them to the `Executor`.
++*   This design prevents a long-running robot from blocking the scheduling of other robots.
++
++## Evolution
++### Historical
++*   **v1:** Initial design using `APScheduler` to create database entries for pending tasks.
+diff --git a/architecture/infrastructure/ARCH-dal-v1.md b/architecture/infrastructure/ARCH-dal-v1.md
+new file mode 100644
+index 0000000..3853112
+--- /dev/null
++++ b/architecture/infrastructure/ARCH-dal-v1.md
+@@ -0,0 +1,30 @@
++---
++id: ARCH-dal
++title: "Data Access Layer (DAL)"
++type: component
++layer: infrastructure
++owner: @vibe-team
++version: v1
++status: current
++created: 2025-06-08
++updated: 2025-06-08
++tags: [database, sql, sqlalchemy]
++depends_on: [ARCH-data-models]
++referenced_by: []
++---
++## Context
++The Data Access Layer (DAL) provides a dedicated abstraction layer for all database interactions. It centralizes database logic, making the application easier to maintain and test, and decouples the core application logic from the specific database implementation (MS SQL Server).
++
++## Structure
++*   **Primary File:** `src/vibe_python/database.py`
++*   **Framework:** `SQLAlchemy` (Core or ORM)
++*   **Key Responsibilities:**
++    *   Managing the database connection and session.
++    *   Providing high-level functions for Create, Read, Update, and Delete (CRUD) operations on the database tables (`TaskRuns`, `LogEntries`).
++    *   Examples of functions: `create_task_run()`, `get_next_pending_task()`, `update_task_status()`, `add_log_entry()`.
++    *   Translating between application-level objects and database records, using the models defined in `ARCH-data-models`.
++
++## Behavior
++*   All other components that need to interact with the database (e.g., `Scheduler`, `Executor`, `CLI`) must do so exclusively through the functions provided by the DAL. They are never to interact with `SQLAlchemy` or the database driver directly.
++
++## Evolution
++### Historical
++*   **v1:** Initial design. Provides all necessary CRUD operations for task and log management.
+diff --git a/architecture/infrastructure/ARCH-notifier-v1.md b/architecture/infrastructure/ARCH-notifier-v1.md
+new file mode 100644
+index 0000000..f6c5f7d
+--- /dev/null
++++ b/architecture/infrastructure/ARCH-notifier-v1.md
+@@ -0,0 +1,28 @@
++---
++id: ARCH-notifier
++title: "Email Notifier"
++type: component
++layer: infrastructure
++owner: @vibe-team
++version: v1
++status: current
++created: 2025-06-08
++updated: 2025-06-08
++tags: [notification, email, smtp]
++depends_on: [ARCH-config-manager]
++referenced_by: []
++---
++## Context
++The Notifier component is responsible for sending out-of-band notifications, specifically email alerts when a robot task fails permanently (i.e., after all retries are exhausted).
++
++## Structure
++*   **Primary File:** `src/vibe_python/notifier.py`
++*   **Key Responsibilities:**
++    *   Provides a simple function, e.g., `send_failure_notification(task_run_details)`.
++    *   Reads email server configuration (SMTP host, port, credentials) and recipient list from the `.env` file via the `Configuration Manager`.
++    *   Formats a clear and informative email body, including details like the robot name, time of failure, and the final error message.
++    *   Handles potential exceptions during the email sending process to prevent a notification failure from crashing the executor.
++
++## Behavior
++*   The `Executor` calls this component only after a task has failed its final retry attempt.
++
++## Evolution
++### Historical
++*   **v1:** Initial design to support email notifications for failed tasks.
+diff --git a/tasks/2025-Q2/TASK-2025-001-phase1-core-engine.md b/tasks/2025-Q2/TASK-2025-001-phase1-core-engine.md
+new file mode 100644
+index 0000000..8ac72d3
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-001-phase1-core-engine.md
+@@ -0,0 +1,29 @@
++---
++id: TASK-2025-001
++title: "Phase 1: Core Engine & Manual Execution"
++status: ready
++priority: high
++type: feature
++estimate: 'L'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: []
++children: [TASK-2025-002, TASK-2025-003, TASK-2025-004, TASK-2025-005, TASK-2025-006]
++arch_refs: [ARCH-cli-orchestrator, ARCH-executor, ARCH-data-models]
++risk: medium
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status ready"}
++---
++## Description
++This epic covers the foundational work to build the core components of the RPA orchestrator. The goal is to have a system where a developer can manually trigger a defined robot from the command line and have it execute its actions. This phase focuses on the core execution logic, configuration, and session stability, without database persistence or automated scheduling.
++
++## Acceptance Criteria
++*   The project structure is established according to the design plan.
++*   Robot actions can be defined in a JSON file and parsed by the application.
++*   A CLI command exists to manually run a specific robot by name (`vibe-python run-now <robot_name>`).
++*   The application can prevent the RDP session from locking while a robot is active.
++
++## Definition of Done
++*   All child tasks (TASK-2025-002 to TASK-2025-006) are completed and marked as 'done'.
++*   The core engine can be demonstrated by running a simple robot manually from the CLI.
+diff --git a/tasks/2025-Q2/TASK-2025-002-scaffolding.md b/tasks/2025-Q2/TASK-2025-002-scaffolding.md
+new file mode 100644
+index 0000000..a4892c5
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-002-scaffolding.md
+@@ -0,0 +1,24 @@
++---
++id: TASK-2025-002
++title: "Project Scaffolding and Dependency Setup"
++status: ready
++priority: high
++type: chore
++estimate: 'S'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-001]
++children: []
++arch_refs: []
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status ready"}
++---
++## Description
++Establish the initial project directory structure and set up the dependency management file (`pyproject.toml`). This task lays the groundwork for all subsequent development.
++
++## Acceptance Criteria
++*   The project directory structure (including `src/vibe_python`, `configs/robots.d`, `scripts`, `tests`) is created as defined in the architecture plan.
++*   A `pyproject.toml` file is created.
++*   Core dependencies (`typer`, `pydantic`, `python-dotenv`, `pyautogui`, `SQLAlchemy`, `pyodbc`) are added to the dependency list.
++
++## Definition of Done
++*   The new directory structure exists in the repository.
++*   The `pyproject.toml` file is committed.
+diff --git a/tasks/2025-Q2/TASK-2025-003-core-models.md b/tasks/2025-Q2/TASK-2025-003-core-models.md
+new file mode 100644
+index 0000000..1f8cf35
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-003-core-models.md
+@@ -0,0 +1,25 @@
++---
++id: TASK-2025-003
++title: "Define Core Data Models"
++status: ready
++priority: high
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-001]
++children: []
++arch_refs: [ARCH-data-models]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status ready"}
++---
++## Description
++Create the Pydantic and SQLAlchemy models in a central `src/vibe_python/models.py` file. These models will be used for configuration validation and database schema definition.
++
++## Acceptance Criteria
++*   A `src/vibe_python/models.py` file is created.
++*   Pydantic models for `Robot`, `Action`, `Schedule`, and `OnFailure` are defined.
++*   SQLAlchemy models for `TaskRun` and `LogEntry` are defined, including the `retry_count` column on `TaskRun`.
++
++## Definition of Done
++*   The `models.py` file is implemented and passes linting.
+diff --git a/tasks/2025-Q2/TASK-2025-004-core-executor.md b/tasks/2025-Q2/TASK-2025-004-core-executor.md
+new file mode 100644
+index 0000000..f58da75
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-004-core-executor.md
+@@ -0,0 +1,24 @@
++---
++id: TASK-2025-004
++title: "Implement the Core Robot Executor"
++status: ready
++priority: high
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-001]
++children: []
++arch_refs: [ARCH-executor]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status ready"}
++---
++## Description
++Implement the initial version of the Robot Executor in `src/vibe_python/executor.py`. This version will focus on translating a robot's action list into `pyautogui` calls.
++
++## Acceptance Criteria
++*   An `executor.py` module is created.
++*   It contains a function that accepts a Pydantic `Robot` object.
++*   The function iterates through the robot's `actions` list and executes them using `pyautogui`.
++*   This initial implementation does not need to include retry logic or database integration.
++
++## Definition of Done
++*   The executor function is implemented and can successfully run a simple, hardcoded robot definition.
+diff --git a/tasks/2025-Q2/TASK-2025-005-session-keep-alive.md b/tasks/2025-Q2/TASK-2025-005-session-keep-alive.md
+new file mode 100644
+index 0000000..0e695d7
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-005-session-keep-alive.md
+@@ -0,0 +1,22 @@
++---
++id: TASK-2025-005
++title: "Implement Session Keep-Alive"
++status: ready
++priority: high
++type: feature
++estimate: 'S'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-001]
++children: []
++arch_refs: [ARCH-executor]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status ready"}
++---
++## Description
++Implement a mechanism within the `Executor` to prevent the RDP session from locking or activating a screensaver during periods of inactivity between tasks.
++
++## Acceptance Criteria
++*   The `Executor` includes a method that, when active, performs a small, non-disruptive action (e.g., minor mouse movement) periodically.
++*   This mechanism is only active when the application is running in service mode.
+diff --git a/tasks/2025-Q2/TASK-2025-006-basic-cli.md b/tasks/2025-Q2/TASK-2025-006-basic-cli.md
+new file mode 100644
+index 0000000..f6a152d
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-006-basic-cli.md
+@@ -0,0 +1,24 @@
++---
++id: TASK-2025-006
++title: "Build a Basic CLI for Manual Triggering"
++status: ready
++priority: high
++type: feature
++estimate: 'S'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-001]
++children: []
++arch_refs: [ARCH-cli-orchestrator, ARCH-executor, ARCH-config-manager]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status ready"}
++---
++## Description
++Implement the initial command-line interface using `Typer` in `src/vibe_python/main.py`. The primary goal is to create the `run-now` command to test the core executor.
++
++## Acceptance Criteria
++*   A `main.py` file is created with a `Typer` application.
++*   A `run-now <robot_name>` command is implemented.
++*   This command successfully loads a robot definition from a JSON file (hardcoded path for now), and passes it to the `Executor` for execution.
++*   A `list-robots` command is also implemented.
+diff --git a/tasks/2025-Q2/TASK-2025-007-phase2-database-and-resilience.md b/tasks/2025-Q2/TASK-2025-007-phase2-database-and-resilience.md
+new file mode 100644
+index 0000000..8885b5e
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-007-phase2-database-and-resilience.md
+@@ -0,0 +1,29 @@
++---
++id: TASK-2025-007
++title: "Phase 2: Database, Notifications & Resilience"
++status: backlog
++priority: high
++type: feature
++estimate: 'L'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: []
++children: [TASK-2025-008, TASK-2025-009, TASK-2025-010, TASK-2025-011, TASK-2025-012, TASK-2025-013]
++arch_refs: [ARCH-dal, ARCH-notifier, ARCH-executor, ARCH-cli-orchestrator]
++risk: medium
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++This epic focuses on making the application robust and observable. It involves integrating the MS SQL Server database for state management and logging, implementing failure notifications, and adding a configurable retry mechanism to the executor.
++
++## Acceptance Criteria
++*   All task runs and their logs are persisted to the database.
++*   The executor automatically retries failed tasks according to the robot's configuration.
++*   An email notification is sent when a task fails permanently.
++*   The user can check the status of tasks and re-run failed tasks via new CLI commands.
++
++## Definition of Done
++*   All child tasks (TASK-2025-008 to TASK-2025-013) are completed and marked as 'done'.
++*   A failed task can be demonstrated to trigger the retry logic and send a notification.
+diff --git a/tasks/2025-Q2/TASK-2025-008-db-schema.md b/tasks/2025-Q2/TASK-2025-008-db-schema.md
+new file mode 100644
+index 0000000..699cd10
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-008-db-schema.md
+@@ -0,0 +1,22 @@
++---
++id: TASK-2025-008
++title: "Design and Implement Database Schema"
++status: backlog
++priority: high
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-007]
++children: []
++arch_refs: [ARCH-data-models, ARCH-dal]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++Implement the database schema using the SQLAlchemy models defined in `models.py`. Create a script or utility function to initialize the database with the required tables.
++
++## Acceptance Criteria
++*   The `TaskRuns` and `LogEntries` tables are correctly defined as SQLAlchemy models.
++*   A mechanism exists (e.g., a CLI command or function) to create these tables in the target MS SQL Server database.
+diff --git a/tasks/2025-Q2/TASK-2025-009-implement-dal.md b/tasks/2025-Q2/TASK-2025-009-implement-dal.md
+new file mode 100644
+index 0000000..9df29b2
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-009-implement-dal.md
+@@ -0,0 +1,23 @@
++---
++id: TASK-2025-009
++title: "Implement the Data Access Layer (DAL)"
++status: backlog
++priority: high
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-007]
++children: []
++arch_refs: [ARCH-dal]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++Create the Data Access Layer in `src/vibe_python/database.py`. This module will encapsulate all database operations and connect to the MS SQL Server using credentials from the `.env` file.
++
++## Acceptance Criteria
++*   The `database.py` module is created.
++*   It contains functions for all required CRUD operations (e.g., `create_task_run`, `update_task_status`, `get_task_by_id`, `add_log_entry`).
++*   The DAL can successfully connect to the database.
+diff --git a/tasks/2025-Q2/TASK-2025-010-implement-notifier.md b/tasks/2025-Q2/TASK-2025-010-implement-notifier.md
+new file mode 100644
+index 0000000..69b2b52
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-010-implement-notifier.md
+@@ -0,0 +1,23 @@
++---
++id: TASK-2025-010
++title: "Implement Email Notifier"
++status: backlog
++priority: high
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-08-08
++parents: [TASK-2025-007]
++children: []
++arch_refs: [ARCH-notifier]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++Create the email notification component in `src/vibe_python/notifier.py`. This module will be responsible for sending email alerts for terminally failed tasks.
++
++## Acceptance Criteria
++*   The `notifier.py` module is created.
++*   It contains a function that can send an email using SMTP credentials from the `.env` file.
++*   The email body is templated and contains relevant failure information (robot name, timestamp, error).
+diff --git a/tasks/2025-Q2/TASK-2025-011-executor-retry-logic.md b/tasks/2025-Q2/TASK-2025-011-executor-retry-logic.md
+new file mode 100644
+index 0000000..f6f6932
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-011-executor-retry-logic.md
+@@ -0,0 +1,23 @@
++---
++id: TASK-2025-011
++title: "Implement Robot Failure Retry Logic in Executor"
++status: backlog
++priority: high
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-007]
++children: []
++arch_refs: [ARCH-executor, ARCH-data-models]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++Enhance the `Executor` to be resilient to transient failures by implementing an automated retry mechanism.
++
++## Acceptance Criteria
++*   The executor reads the `on_failure` policy (`retries`, `delay_seconds`) from the robot's configuration.
++*   The task execution is wrapped in a loop that respects the number of configured retries.
++*   A delay is introduced between retry attempts.
+diff --git a/tasks/2025-Q2/TASK-2025-012-integrate-dal-notifier-executor.md b/tasks/2025-Q2/TASK-2025-012-integrate-dal-notifier-executor.md
+new file mode 100644
+index 0000000..4f81014
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-012-integrate-dal-notifier-executor.md
+@@ -0,0 +1,24 @@
++---
++id: TASK-2025-012
++title: "Integrate DAL and Notifier with the Executor"
++status: backlog
++priority: high
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-007]
++children: []
++arch_refs: [ARCH-executor, ARCH-dal, ARCH-notifier]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++Connect the `Executor` to the `DAL` and `Notifier` to complete the full, resilient task execution lifecycle.
++
++## Acceptance Criteria
++*   The `Executor` calls the `DAL` to create/update `TaskRun` records (e.g., set status to 'Running', increment `retry_count`).
++*   The `Executor` calls the `DAL` to write to the `LogEntries` table.
++*   Upon final failure of a task, the `Executor` calls the `Notifier` to send an email alert before setting the task status to 'Failed'.
++*   On failure, a screenshot of the desktop is captured and its path is logged to the database.
+diff --git a/tasks/2025-Q2/TASK-2025-013-cli-status-commands.md b/tasks/2025-Q2/TASK-2025-013-cli-status-commands.md
+new file mode 100644
+index 0000000..d6e4693
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-013-cli-status-commands.md
+@@ -0,0 +1,23 @@
++---
++id: TASK-2025-013
++title: "Implement CLI Status Commands"
++status: backlog
++priority: high
++type: feature
++estimate: 'S'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-007]
++children: []
++arch_refs: [ARCH-cli-orchestrator, ARCH-dal]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++Enhance the CLI with commands that allow the user to query the state of the system from the database.
++
++## Acceptance Criteria
++*   A `vibe-python status [--limit N]` command is implemented that shows the status of the last N task runs.
++*   A `vibe-python status <task_run_id>` command shows detailed status and logs for a specific run.
++*   A `vibe-python rerun <task_run_id>` command is implemented to re-queue a past task.
+diff --git a/tasks/2025-Q2/TASK-2025-014-phase3-scheduling.md b/tasks/2025-Q2/TASK-2025-014-phase3-scheduling.md
+new file mode 100644
+index 0000000..69f000b
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-014-phase3-scheduling.md
+@@ -0,0 +1,27 @@
++---
++id: TASK-2025-014
++title: "Phase 3: Scheduling and Service Operation"
++status: backlog
++priority: medium
++type: feature
++estimate: 'L'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: []
++children: [TASK-2025-015, TASK-2025-016, TASK-2025-017]
++arch_refs: [ARCH-scheduler, ARCH-cli-orchestrator]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++This epic covers the implementation of automated task scheduling and turning the application into a long-running, manageable service.
++
++## Acceptance Criteria
++*   The application can automatically queue robot tasks based on cron schedules in their configuration files.
++*   A CLI command (`start-service`) exists to run the application as a persistent service.
++*   A CLI command (`restart-service`) exists to gracefully restart the service to apply configuration changes.
++
++## Definition of Done
++*   All child tasks (TASK-2025-015 to TASK-2025-017) are completed and marked as 'done'.
++*   A scheduled task can be demonstrated to run automatically at its configured time.
+diff --git a/tasks/2025-Q2/TASK-2025-015-apscheduler-integration.md b/tasks/2025-Q2/TASK-2025-015-apscheduler-integration.md
+new file mode 100644
+index 0000000..8d27376
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-015-apscheduler-integration.md
+@@ -0,0 +1,24 @@
++---
++id: TASK-2025-015
++title: "Integrate APScheduler and Implement Schedule Loading"
++status: backlog
++priority: medium
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-014]
++children: []
++arch_refs: [ARCH-scheduler]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++Implement the `Scheduler` component in `src/vibe_python/scheduler.py`. This component will use `APScheduler` to read robot configurations and schedule jobs.
++
++## Acceptance Criteria
++*   `APScheduler` is added as a dependency.
++*   The `Scheduler` component is created.
++*   On startup, the scheduler reads all robot configs and, for each enabled robot, schedules a job based on its cron expression.
++*   The scheduled job's only action is to call the DAL to create a 'Pending' task in the database.
+diff --git a/tasks/2025-Q2/TASK-2025-016-service-orchestration.md b/tasks/2025-Q2/TASK-2025-016-service-orchestration.md
+new file mode 100644
+index 0000000..f6b64f0
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-016-service-orchestration.md
+@@ -0,0 +1,23 @@
++---
++id: TASK-2025-016
++title: "Create the Main Orchestration Service"
++status: backlog
++priority: medium
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-014]
++children: []
++arch_refs: [ARCH-cli-orchestrator, ARCH-scheduler, ARCH-executor]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++Implement the `start-service` CLI command. This command will start the application as a long-running process, activating both the scheduler and the executor worker loop.
++
++## Acceptance Criteria
++*   A `vibe-python start-service` command is created.
++*   When run, it starts the `APScheduler` to begin queueing jobs.
++*   It then enters a loop that periodically polls the database for 'Pending' tasks and passes them to the `Executor`.
+diff --git a/tasks/2025-Q2/TASK-2025-017-restart-mechanism.md b/tasks/2025-Q2/TASK-2025-017-restart-mechanism.md
+new file mode 100644
+index 0000000..bbd4833
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-017-restart-mechanism.md
+@@ -0,0 +1,24 @@
++---
++id: TASK-2025-017
++title: "Implement a Service Restart Mechanism"
++status: backlog
++priority: medium
++type: feature
++estimate: 'S'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-014]
++children: []
++arch_refs: [ARCH-cli-orchestrator]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++Create a reliable mechanism for restarting the service to apply configuration changes. This involves using a process ID (`.pid`) file and a helper script.
++
++## Acceptance Criteria
++*   The `start-service` command is updated to write the current process ID to a `.pid` file.
++*   A helper script (e.g., `scripts/restart.bat`) is created that reads the PID, stops the process, and starts a new one.
++*   A `vibe-python restart-service` CLI command is implemented that executes this helper script.
+diff --git a/tasks/2025-Q2/TASK-2025-018-phase4-config-scalability.md b/tasks/2025-Q2/TASK-2025-018-phase4-config-scalability.md
+new file mode 100644
+index 0000000..200213d
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-018-phase4-config-scalability.md
+@@ -0,0 +1,24 @@
++---
++id: TASK-2025-018
++title: "Phase 4: Configuration Scalability"
++status: backlog
++priority: low
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: []
++children: [TASK-2025-019]
++arch_refs: [ARCH-config-manager]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++This epic improves the maintainability of the application as the number of robots grows by moving from a single configuration file to a more scalable directory-based approach.
++
++## Acceptance Criteria
++*   The application can load robot definitions from any `*.json` file placed in the `configs/robots.d/` directory.
++
++## Definition of Done
++*   The child task (TASK-2025-019) is completed and marked as 'done'.
+diff --git a/tasks/2025-Q2/TASK-2025-019-directory-based-config.md b/tasks/2025-Q2/TASK-2025-019-directory-based-config.md
+new file mode 100644
+index 0000000..4d081f2
+--- /dev/null
++++ b/tasks/2025-Q2/TASK-2025-019-directory-based-config.md
+@@ -0,0 +1,23 @@
++---
++id: TASK-2025-019
++title: "Refactor Configuration Manager for Directory Loading"
++status: backlog
++priority: low
++type: feature
++estimate: 'M'
++assignee: '@vibe-team'
++created: 2025-06-08
++updated: 2025-06-08
++parents: [TASK-2025-018]
++children: []
++arch_refs: [ARCH-config-manager, ARCH-cli-orchestrator]
++audit_log:
++  - {date: 2025-06-08, user: "@AI-DocArchitect", action: "created with status backlog"}
++---
++## Description
++Refactor the `Configuration Manager` to support loading all `*.json` files from the `configs/robots.d/` directory, instead of a single file.
++
++## Acceptance Criteria
++*   The `config.py` module is updated to scan, load, and consolidate all robot configurations from the directory.
++*   The system raises a startup error if duplicate `robot_name` values are detected.
++*   All CLI commands that rely on robot configurations (e.g., `list-robots`, `run-now`) work correctly with the consolidated list.
