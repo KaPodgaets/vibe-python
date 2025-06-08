@@ -1,0 +1,18 @@
+[project]
+name = "vibe-python"
+version = "0.1.0"
+description = "Python-based RPA Orchestrator"
+dependencies = [
+    "typer[all]",
+    "pydantic",
+    "python-dotenv",
+    "pyautogui",
+    "SQLAlchemy",
+    "pyodbc"
+]
+
+[project.scripts]
+vibe-python = "vibe_python.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"] 
