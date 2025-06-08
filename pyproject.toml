@@ -8,7 +8,8 @@ dependencies = [
     "python-dotenv",
     "pyautogui",
     "SQLAlchemy",
-    "pyodbc"
+    "pyodbc",
+    "rich"
 ]
 
 [project.scripts]

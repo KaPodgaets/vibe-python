@@ -1,6 +1,8 @@
 import json
+import os
 from pathlib import Path
 from typing import List, Optional, Dict
+from dotenv import load_dotenv
 
 from .models import Robot
 
@@ -17,8 +19,10 @@ class ConfigManager:
     will be implemented in a later phase.
     """
     def __init__(self):
+        load_dotenv()
         self._robots: Dict[str, Robot] = {}
         self._load_robots()
+        self.db_connection_string = os.getenv("DB_CONNECTION_STRING")
 
     def _load_robots(self):
         if not CONFIG_FILE_PATH.exists():

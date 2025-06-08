@@ -1,307 +1,422 @@
-diff --git a/configs/.gitkeep b/configs/.gitkeep
-new file mode 100644
-index 0000000..e69de29
---- /dev/null
-+++ b/configs/.gitkeep
-diff --git a/configs/robots.d/.gitkeep b/configs/robots.d/.gitkeep
-new file mode 100644
-index 0000000..e69de29
---- /dev/null
-+++ b/configs/robots.d/.gitkeep
 diff --git a/pyproject.toml b/pyproject.toml
-new file mode 100644
-index 0000000..3793f0b
---- /dev/null
+index 3793f0b..6301382 100644
+--- a/pyproject.toml
 +++ b/pyproject.toml
-@@ -0,0 +1,18 @@
-+[project]
-+name = "vibe-python"
-+version = "0.1.0"
-+description = "Python-based RPA Orchestrator"
-+dependencies = [
-+    "typer[all]",
-+    "pydantic",
-+    "python-dotenv",
-+    "pyautogui",
-+    "SQLAlchemy",
-+    "pyodbc"
-+]
-+
-+[project.scripts]
-+vibe-python = "vibe_python.main:app"
-+
-+[tool.setuptools.packages.find]
-+where = ["src"]
-diff --git a/scripts/.gitkeep b/scripts/.gitkeep
-new file mode 100644
-index 0000000..e69de29
---- /dev/null
-+++ b/scripts/.gitkeep
-diff --git a/src/main.py b/src/main.py
-deleted file mode 100644
-index e69de29..0000000
-diff --git a/src/vibe_python/__init__.py b/src/vibe_python/__init__.py
-new file mode 100644
-index 0000000..e69de29
---- /dev/null
-+++ b/src/vibe_python/__init__.py
+@@ -6,7 +6,8 @@
+     "python-dotenv",
+     "pyautogui",
+     "SQLAlchemy",
+-    "pyodbc"
++    "pyodbc",
++    "rich"
+ ]
+ 
+ [project.scripts]
 diff --git a/src/vibe_python/config.py b/src/vibe_python/config.py
-new file mode 100644
-index 0000000..6b16e87
---- /dev/null
+index 6b16e87..0b76e1a 100644
+--- a/src/vibe_python/config.py
 +++ b/src/vibe_python/config.py
-@@ -0,0 +1,41 @@
-+import json
+@@ -1,8 +1,11 @@
+ import json
++import os
+ from pathlib import Path
+ from typing import List, Optional, Dict
+ 
++from dotenv import load_dotenv
+ from .models import Robot
++
+ 
+ # For Phase 1, we will use a single file as a starting point.
+ # The path is relative to the project root.
+@@ -16,9 +19,11 @@
+     object or a list of robot objects. A more robust directory-based loader
+     will be implemented in a later phase.
+     """
+     def __init__(self):
++        load_dotenv()
+         self._robots: Dict[str, Robot] = {}
+         self._load_robots()
++        self.db_connection_string = os.getenv("DB_CONNECTION_STRING")
+ 
+     def _load_robots(self):
+         if not CONFIG_FILE_PATH.exists():
+diff --git a/src/vibe_python/database.py b/src/vibe_python/database.py
+new file mode 100644
+index 0000000..f6f7eb5
+--- /dev/null
++++ b/src/vibe_python/database.py
+@@ -0,0 +1,78 @@
++import datetime
++from contextlib import contextmanager
++from typing import List, Optional
++
++from sqlalchemy import create_engine
++from sqlalchemy.orm import sessionmaker, Session
++
++from .models import Base, TaskRun, LogEntry
++
++
++class DataAccessLayer:
++    def __init__(self, connection_string: str):
++        self.engine = create_engine(connection_string)
++        self.SessionMaker = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
++
++    def create_schema(self):
++        """Creates all tables defined in the Base metadata."""
++        Base.metadata.create_all(self.engine)
++        print("Database schema created successfully.")
++
++    @contextmanager
++    def get_session(self) -> Session:
++        """Provide a transactional scope around a series of operations."""
++        session = self.SessionMaker()
++        try:
++            yield session
++            session.commit()
++        except Exception:
++            session.rollback()
++            raise
++        finally:
++            session.close()
++
++    def create_task_run(self, robot_name: str, status: str = 'Pending') -> TaskRun:
++        """Creates a new task run record in the database."""
++        new_task = TaskRun(robot_name=robot_name, status=status)
++        with self.get_session() as session:
++            session.add(new_task)
++            session.flush()
++            session.refresh(new_task)
++            return new_task
++
++    def get_task_run(self, task_run_id: int) -> Optional[TaskRun]:
++        """Retrieves a single task run by its ID, with its logs."""
++        with self.get_session() as session:
++            return session.query(TaskRun).filter(TaskRun.id == task_run_id).first()
++
++    def get_latest_task_runs(self, limit: int = 10) -> List[TaskRun]:
++        """Retrieves the N most recent task runs."""
++        with self.get_session() as session:
++            return session.query(TaskRun).order_by(TaskRun.created_at.desc()).limit(limit).all()
++
++    def update_task_run_status(self, task_run_id: int, status: str, result_message: Optional[str] = None):
++        """Updates the status and result message of a task run."""
++        with self.get_session() as session:
++            task = session.query(TaskRun).filter(TaskRun.id == task_run_id).one()
++            task.status = status
++            if status in ['Running']:
++                task.started_at = datetime.datetime.utcnow()
++            if status in ['Success', 'Failed']:
++                task.completed_at = datetime.datetime.utcnow()
++            if result_message:
++                task.result_message = result_message
++
++    def increment_task_retry_count(self, task_run_id: int):
++        """Increments the retry count for a given task run."""
++        with self.get_session() as session:
++            task = session.query(TaskRun).filter(TaskRun.id == task_run_id).one()
++            task.retry_count += 1
++
++    def add_log_entry(self, task_run_id: int, level: str, message: str, screenshot_path: Optional[str] = None):
++        """Adds a new log entry for a specific task run."""
++        new_log = LogEntry(
++            task_run_id=task_run_id, level=level, message=message, screenshot_path=screenshot_path
++        )
++        with self.get_session() as session:
++            session.add(new_log)
+diff --git a/src/vibe_python/executor.py b/src/vibe_python/executor.py
+index 202f5a6..92518e7 100644
+--- a/src/vibe_python/executor.py
++++ b/src/vibe_python/executor.py
+@@ -2,7 +2,12 @@
+ import time
+ import threading
+-from .models import Robot, Action
++import datetime
 +from pathlib import Path
-+from typing import List, Optional, Dict
 +
-+from .models import Robot
++from .models import Robot, Action, TaskRun
++from .database import DataAccessLayer
++from .notifier import Notifier
+ 
+ _keep_alive_thread = None
+ _keep_alive_stop_event = threading.Event()
+@@ -42,7 +47,7 @@
+         _keep_alive_thread.join(timeout=5)
+         _keep_alive_thread = None
+ 
+-def execute_action(action: Action):
++def execute_action(action: Action, dal: DataAccessLayer, task_run: TaskRun):
+     """Translates a single Action model into a pyautogui call."""
+     action_map = {
+         "move_to": lambda p: pyautogui.moveTo(p.get('x'), p.get('y'), duration=p.get('duration', 0.2)),
+@@ -51,28 +56,76 @@
+         "write": lambda p: pyautogui.write(p.get('text', ''), interval=p.get('interval', 0.05)),
+         "press": lambda p: pyautogui.press(p.get('keys')),
+         "hotkey": lambda p: pyautogui.hotkey(*p.get('keys', [])),
+-        "screenshot": lambda p: pyautogui.screenshot(p.get('filename')),
++        "screenshot": lambda p: _take_screenshot(dal, task_run, p.get('filename')),
+         "wait": lambda p: time.sleep(p.get('seconds', 1)),
+     }
+     
+     if action.type in action_map:
+         action_map[action.type](action.params)
++        dal.add_log_entry(task_run.id, "INFO", f"Action '{action.type}' executed successfully.")
+     else:
+         raise ValueError(f"Unknown action type: {action.type}")
+ 
+-def execute_robot(robot: Robot):
+-    """Executes the sequence of actions for a given robot (Phase 1 basic implementation)."""
+-    print(f"--- Starting execution for robot: {robot.robot_name} ---")
+-    for i, action in enumerate(robot.actions):
+-        print(f"Step {i+1}: Executing action '{action.type}' - {action.description or ''}")
++def _take_screenshot(dal: DataAccessLayer, task_run: TaskRun, filename_prefix: str) -> str:
++    """Takes a screenshot, saves it, and logs it to the database."""
++    screenshots_dir = Path("screenshots")
++    screenshots_dir.mkdir(exist_ok=True)
++    
++    timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
++    filename = f"{filename_prefix}_{task_run.id}_{timestamp}.png"
++    filepath = screenshots_dir / filename
++    
++    pyautogui.screenshot(filepath)
++    dal.add_log_entry(task_run.id, "INFO", f"Screenshot taken: {filepath}", screenshot_path=str(filepath))
++    return str(filepath)
 +
-+# For Phase 1, we will use a single file as a starting point.
-+# The path is relative to the project root.
-+CONFIG_FILE_PATH = Path("configs/sample_robot.json")
 +
-+class ConfigManager:
-+    """
-+    A simple configuration manager for Phase 1.
++def execute_robot(robot: Robot, dal: DataAccessLayer, notifier: Notifier, task_run: TaskRun):
++    """Executes the sequence of actions for a given robot with resilience."""
++    max_retries = robot.on_failure.retries
++    
++    dal.update_task_run_status(task_run.id, "Running")
++    dal.add_log_entry(task_run.id, "INFO", f"Starting execution for robot: {robot.robot_name}")
 +
-+    It loads a single hardcoded JSON file which can contain a single robot
-+    object or a list of robot objects. A more robust directory-based loader
-+    will be implemented in a later phase.
-+    """
++    for attempt in range(max_retries + 1):
+         try:
+-            execute_action(action)
++            for i, action in enumerate(robot.actions):
++                dal.add_log_entry(
++                    task_run.id, "INFO", f"Attempt {attempt+1}, Step {i+1}: Executing '{action.type}' - {action.description or ''}"
++                )
++                execute_action(action, dal, task_run)
++
++            # If all actions succeeded
++            success_message = f"Robot '{robot.robot_name}' completed successfully."
++            dal.update_task_run_status(task_run.id, "Success", result_message=success_message)
++            dal.add_log_entry(task_run.id, "INFO", success_message)
++            print(f"--- {success_message} ---")
++            return # Exit after success
++
+         except Exception as e:
+-            print(f"!!! ERROR on step {i+1} ({action.type}): {e}")
+-            print(f"--- Halting execution for robot: {robot.robot_name} ---")
+-            raise  # Re-raise exception to be handled by the caller
+-    print(f"--- Finished execution for robot: {robot.robot_name} ---")
++            error_message = f"Error during attempt {attempt+1}: {e}"
++            print(f"!!! {error_message} !!!")
++            
++            # Log error and take screenshot
++            screenshot_path = _take_screenshot(dal, task_run, "error")
++            dal.add_log_entry(
++                task_run.id, "ERROR", f"{error_message}. Screenshot saved to {screenshot_path}"
++            )
++
++            if attempt < max_retries:
++                # This is a retryable attempt
++                dal.increment_task_retry_count(task_run.id)
++                delay = robot.on_failure.delay_seconds
++                retry_log_msg = f"Waiting for {delay} seconds before next attempt..."
++                dal.add_log_entry(task_run.id, "WARN", retry_log_msg)
++                print(retry_log_msg)
++                time.sleep(delay)
++            else:
++                # All retries have been exhausted
++                final_error_msg = f"Robot '{robot.robot_name}' failed after {max_retries+1} attempts."
++                dal.update_task_run_status(task_run.id, "Failed", result_message=final_error_msg)
++                dal.add_log_entry(task_run.id, "ERROR", final_error_msg)
++                notifier.send_failure_notification(robot, task_run, str(e))
++                print(f"--- {final_error_msg} ---")
++                break # Exit loop after final failure
+diff --git a/src/vibe_python/main.py b/src/vibe_python/main.py
+index 7560d29..00b746c 100644
+--- a/src/vibe_python/main.py
++++ b/src/vibe_python/main.py
+@@ -1,16 +1,33 @@
+ import typer
+ from typing_extensions import Annotated
++from typing import Optional
++from rich.console import Console
++from rich.table import Table
+ 
+ from .config import ConfigManager
+ from .executor import execute_robot
++from .database import DataAccessLayer
++from .notifier import Notifier
+ 
+ app = typer.Typer(help="A Python-based RPA Orchestrator.")
++console = Console()
+ 
+ # Initialize the configuration manager once on startup.
+ try:
+     config_manager = ConfigManager()
++    if not config_manager.db_connection_string:
++        console.print("[bold red]Error: DB_CONNECTION_STRING not found in .env file.[/bold red]")
++        raise typer.Exit(code=1)
++    
++    dal = DataAccessLayer(config_manager.db_connection_string)
++    notifier = Notifier()
++
+ except Exception as e:
+-    typer.echo(f"Failed to initialize configuration: {e}", err=True)
++    console.print(f"[bold red]Failed to initialize application: {e}[/bold red]")
+     raise typer.Exit(code=1)
+ 
+ @app.command()
++def init_db():
++    """Initializes the database schema. DANGEROUS: Do not run on a DB with data."""
++    dal.create_schema()
++    console.print("[bold green]Database schema initialized successfully.[/bold green]")
++
++@app.command()
+ def list_robots():
+     """Lists all robots defined in the configuration."""
+     typer.echo("Available Robots:")
+@@ -23,28 +40,78 @@
+ 
+ @app.command()
+ def run_now(
+-    robot_name: Annotated[str, typer.Argument(help="The name of the robot to run.")]
++    robot_name: Annotated[str, typer.Argument(help="The name of the robot to run.")],
+ ):
+     """Immediately runs a single robot."""
+-    typer.echo(f"Attempting to run robot: {robot_name}")
+     robot = config_manager.get_robot(robot_name)
+     
+     if not robot:
+-        typer.echo(typer.style(f"Error: Robot '{robot_name}' not found.", fg=typer.colors.RED))
++        console.print(f"[bold red]Error: Robot '{robot_name}' not found.[/bold red]")
+         raise typer.Exit(code=1)
+     if not robot.enabled:
+-        typer.echo(typer.style(f"Warning: Robot '{robot_name}' is disabled. Aborting.", fg=typer.colors.YELLOW))
++        console.print(f"[yellow]Warning: Robot '{robot_name}' is disabled. Aborting.[/yellow]")
+         raise typer.Exit(code=1)
+ 
++    console.print(f"Creating task run for robot: [bold cyan]{robot_name}[/bold cyan]")
++    task_run = dal.create_task_run(robot_name=robot_name)
++    console.print(f"Task run created with ID: {task_run.id}")
++
+     try:
+-        execute_robot(robot)
+-        typer.echo(typer.style(f"Successfully finished running robot '{robot_name}'.", fg=typer.colors.GREEN))
++        execute_robot(robot, dal, notifier, task_run)
+     except Exception as e:
+-        typer.echo(typer.style(f"An error occurred while running robot '{robot_name}': {e}", fg=typer.colors.RED))
++        console.print(f"[bold red]A critical error occurred while running robot '{robot_name}': {e}[/bold red]")
+         raise typer.Exit(code=1)
+ 
++@app.command()
++def status(
++    task_run_id: Annotated[Optional[int], typer.Argument(help="The ID of a specific task run.")] = None,
++    limit: Annotated[int, typer.Option(help="Number of recent runs to show.")] = 10
++):
++    """Shows the status of recent or specific task runs."""
++    if task_run_id:
++        task = dal.get_task_run(task_run_id)
++        if not task:
++            console.print(f"[bold red]Error: Task Run ID '{task_run_id}' not found.[/bold red]")
++            raise typer.Exit(code=1)
++        
++        console.print(f"[bold]Details for Task Run ID: {task.id}[/bold]")
++        console.print(f"  Robot Name: {task.robot_name}")
++        console.print(f"  Status: {task.status}")
++        console.print(f"  Retries: {task.retry_count}")
++        console.print(f"  Result: {task.result_message}")
++        console.print(f"  Created: {task.created_at}")
++        console.print(f"  Started: {task.started_at}")
++        console.print(f"  Completed: {task.completed_at}")
++
++    else:
++        tasks = dal.get_latest_task_runs(limit)
++        table = Table(title=f"Last {limit} Task Runs")
++        table.add_column("ID", justify="right")
++        table.add_column("Robot Name")
++        table.add_column("Status")
++        table.add_column("Created At")
++        table.add_column("Completed At")
++
++        for task in tasks:
++            status_color = {"Success": "green", "Failed": "red", "Running": "yellow"}.get(task.status, "white")
++            table.add_row(
++                str(task.id),
++                task.robot_name,
++                f"[{status_color}]{task.status}[/{status_color}]",
++                str(task.created_at),
++                str(task.completed_at or "N/A"),
++            )
++        console.print(table)
++
++@app.command()
++def rerun(
++    task_run_id: Annotated[int, typer.Argument(help="The ID of the task run to rerun.")]
++):
++    """Re-queues a past task run for execution by creating a new 'Pending' task."""
++    task = dal.get_task_run(task_run_id)
++    if not task:
++        console.print(f"[bold red]Error: Task Run ID '{task_run_id}' not found.[/bold red]")
++        raise typer.Exit(code=1)
++    
++    new_task = dal.create_task_run(robot_name=task.robot_name)
++    console.print(f"Successfully re-queued robot '{task.robot_name}'. New Task Run ID: {new_task.id}")
++
+ if __name__ == "__main__":
+     app()
+diff --git a/src/vibe_python/notifier.py b/src/vibe_python/notifier.py
+new file mode 100644
+index 0000000..7458110
+--- /dev/null
++++ b/src/vibe_python/notifier.py
+@@ -0,0 +1,38 @@
++import os
++import smtplib
++from email.mime.text import MIMEText
++from email.mime.multipart import MIMEMultipart
++
++from .models import Robot, TaskRun
++
++class Notifier:
 +    def __init__(self):
-+        self._robots: Dict[str, Robot] = {}
-+        self._load_robots()
++        self.smtp_server = os.getenv("SMTP_SERVER")
++        self.smtp_port = int(os.getenv("SMTP_PORT", 587))
++        self.smtp_user = os.getenv("SMTP_USER")
++        self.smtp_password = os.getenv("SMTP_PASSWORD")
++        self.recipient_emails = os.getenv("RECIPIENT_EMAILS", "").split(',')
 +
-+    def _load_robots(self):
-+        if not CONFIG_FILE_PATH.exists():
-+            print(f"Warning: Configuration file not found at '{CONFIG_FILE_PATH}'. No robots will be loaded.")
++    def send_failure_notification(self, robot: Robot, task_run: TaskRun, error_message: str):
++        """Sends an email notification for a failed task run."""
++        if not all([self.smtp_server, self.smtp_port, self.smtp_user, self.smtp_password, self.recipient_emails]):
++            print("Email notifier is not configured. Skipping notification.")
 +            return
 +
-+        with open(CONFIG_FILE_PATH, "r") as f:
-+            robots_data = json.load(f)
-+            
-+            robots_to_load = []
-+            if isinstance(robots_data, list):
-+                robots_to_load = [Robot.model_validate(r) for r in robots_data]
-+            elif isinstance(robots_data, dict):
-+                 robots_to_load = [Robot.model_validate(robots_data)]
++        subject = f"RPA Failure: Robot '{robot.robot_name}' Failed"
++        body = f"""
++        <h2>RPA Task Failure Report</h2>
++        <p><strong>Robot:</strong> {robot.robot_name}</p>
++        <p><strong>Task Run ID:</strong> {task_run.id}</p>
++        <p><strong>Time of Failure:</strong> {task_run.completed_at.strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
++        <p><strong>Error Details:</strong></p>
++        <pre>{error_message}</pre>
++        """
 +
-+            self._robots = {r.robot_name: r for r in robots_to_load}
-+            print(f"Loaded {len(self._robots)} robot(s) from {CONFIG_FILE_PATH}.")
++        msg = MIMEMultipart()
++        msg['From'] = self.smtp_user
++        msg['To'] = ", ".join(self.recipient_emails)
++        msg['Subject'] = subject
++        msg.attach(MIMEText(body, 'html'))
 +
-+    def get_all_robots(self) -> List[Robot]:
-+        return list(self._robots.values())
-+
-+    def get_robot(self, robot_name: str) -> Optional[Robot]:
-+        return self._robots.get(robot_name)
-diff --git a/src/vibe_python/executor.py b/src/vibe_python/executor.py
-new file mode 100644
-index 0000000..202f5a6
---- /dev/null
-+++ b/src/vibe_python/executor.py
-@@ -0,0 +1,73 @@
-+import pyautogui
-+import time
-+import threading
-+from .models import Robot, Action
-+
-+_keep_alive_thread = None
-+_keep_alive_stop_event = threading.Event()
-+
-+def _session_keep_alive_worker():
-+    """
-+    Worker function to periodically move the mouse slightly to prevent
-+    RDP session lock or screen saver activation.
-+    """
-+    print("Session keep-alive worker started.")
-+    while not _keep_alive_stop_event.wait(timeout=180): # 3-minute interval
 +        try:
-+            current_pos = pyautogui.position()
-+            # A very small, quick, and non-disruptive move
-+            pyautogui.move(1, 1, duration=0.1)
-+            pyautogui.move(-1, -1, duration=0.1)
-+            # Ensure the mouse returns exactly to its original position
-+            pyautogui.moveTo(current_pos)
-+            print("Keep-alive tick.")
-+        except pyautogui.FailSafeException:
-+            print("Fail-safe triggered during keep-alive. Pausing keep-alive.")
-+            # If user moves mouse to a corner, wait longer before trying again
-+            time.sleep(60)
-+    print("Session keep-alive worker stopped.")
-+
-+def start_session_keep_alive():
-+    """Starts the session keep-alive mechanism in a background thread."""
-+    global _keep_alive_thread
-+    if _keep_alive_thread is None or not _keep_alive_thread.is_alive():
-+        _keep_alive_stop_event.clear()
-+        _keep_alive_thread = threading.Thread(target=_session_keep_alive_worker, daemon=True)
-+        _keep_alive_thread.start()
-+
-+def stop_session_keep_alive():
-+    """Stops the session keep-alive mechanism."""
-+    global _keep_alive_thread
-+    if _keep_alive_thread and _keep_alive_thread.is_alive():
-+        _keep_alive_stop_event.set()
-+        _keep_alive_thread.join(timeout=5)
-+        _keep_alive_thread = None
-+
-+def execute_action(action: Action):
-+    """Translates a single Action model into a pyautogui call."""
-+    action_map = {
-+        "move_to": lambda p: pyautogui.moveTo(p.get('x'), p.get('y'), duration=p.get('duration', 0.2)),
-+        "click": lambda p: pyautogui.click(**p),
-+        "double_click": lambda p: pyautogui.doubleClick(**p),
-+        "write": lambda p: pyautogui.write(p.get('text', ''), interval=p.get('interval', 0.05)),
-+        "press": lambda p: pyautogui.press(p.get('keys')),
-+        "hotkey": lambda p: pyautogui.hotkey(*p.get('keys', [])),
-+        "screenshot": lambda p: pyautogui.screenshot(p.get('filename')),
-+        "wait": lambda p: time.sleep(p.get('seconds', 1)),
-+    }
-+    
-+    if action.type in action_map:
-+        action_map[action.type](action.params)
-+    else:
-+        raise ValueError(f"Unknown action type: {action.type}")
-+
-+def execute_robot(robot: Robot):
-+    """Executes the sequence of actions for a given robot (Phase 1 basic implementation)."""
-+    print(f"--- Starting execution for robot: {robot.robot_name} ---")
-+    for i, action in enumerate(robot.actions):
-+        print(f"Step {i+1}: Executing action '{action.type}' - {action.description or ''}")
-+        try:
-+            execute_action(action)
++            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
++                server.starttls()
++                server.login(self.smtp_user, self.smtp_password)
++                server.send_message(msg)
++            print(f"Successfully sent failure notification for task run {task_run.id}.")
 +        except Exception as e:
-+            print(f"!!! ERROR on step {i+1} ({action.type}): {e}")
-+            print(f"--- Halting execution for robot: {robot.robot_name} ---")
-+            raise  # Re-raise exception to be handled by the caller
-+    print(f"--- Finished execution for robot: {robot.robot_name} ---")
-diff --git a/src/vibe_python/main.py b/src/vibe_python/main.py
-new file mode 100644
-index 0000000..7560d29
---- /dev/null
-+++ b/src/vibe_python/main.py
-@@ -0,0 +1,41 @@
-+import typer
-+from typing_extensions import Annotated
-+
-+from .config import ConfigManager
-+from .executor import execute_robot
-+
-+app = typer.Typer(help="A Python-based RPA Orchestrator.")
-+
-+# Initialize the configuration manager once on startup.
-+try:
-+    config_manager = ConfigManager()
-+except Exception as e:
-+    typer.echo(f"Failed to initialize configuration: {e}", err=True)
-+    raise typer.Exit(code=1)
-+
-+@app.command()
-+def list_robots():
-+    """Lists all robots defined in the configuration."""
-+    typer.echo("Available Robots:")
-+    robots = config_manager.get_all_robots()
-+    if not robots:
-+        typer.echo("  (No robots found in configuration)")
-+        return
-+    for robot in robots:
-+        status = typer.style("enabled", fg=typer.colors.GREEN) if robot.enabled else typer.style("disabled", fg=typer.colors.RED)
-+        typer.echo(f"  - {robot.robot_name} [{status}]")
-+
-+@app.command()
-+def run_now(
-+    robot_name: Annotated[str, typer.Argument(help="The name of the robot to run.")]
-+):
-+    """Immediately runs a single robot."""
-+    typer.echo(f"Attempting to run robot: {robot_name}")
-+    robot = config_manager.get_robot(robot_name)
-+    
-+    if not robot:
-+        typer.echo(typer.style(f"Error: Robot '{robot_name}' not found.", fg=typer.colors.RED))
-+        raise typer.Exit(code=1)
-+    if not robot.enabled:
-+        typer.echo(typer.style(f"Warning: Robot '{robot_name}' is disabled. Aborting.", fg=typer.colors.YELLOW))
-+        raise typer.Exit(code=1)
-+
-+    try:
-+        execute_robot(robot)
-+        typer.echo(typer.style(f"Successfully finished running robot '{robot_name}'.", fg=typer.colors.GREEN))
-+    except Exception as e:
-+        typer.echo(typer.style(f"An error occurred while running robot '{robot_name}': {e}", fg=typer.colors.RED))
-+        raise typer.Exit(code=1)
-+
-+if __name__ == "__main__":
-+    app()
-diff --git a/src/vibe_python/models.py b/src/vibe_python/models.py
-new file mode 100644
-index 0000000..cf11e55
---- /dev/null
-+++ b/src/vibe_python/models.py
-@@ -0,0 +1,56 @@
-+import datetime
-+from typing import List, Dict, Any, Optional
-+
-+from pydantic import BaseModel, Field
-+from sqlalchemy import (Column, Integer, String, DateTime, Enum as SQLEnum,
-+                        ForeignKey)
-+from sqlalchemy.orm import declarative_base, relationship
-+
-+# --- Pydantic Models for Configuration Validation ---
-+
-+class Schedule(BaseModel):
-+    type: str = "cron"
-+    expression: str
-+
-+class OnFailure(BaseModel):
-+    retries: int = Field(0, ge=0)
-+    delay_seconds: int = Field(60, ge=0)
-+
-+class Action(BaseModel):
-+    type: str
-+    params: Dict[str, Any] = Field(default_factory=dict)
-+    description: Optional[str] = None
-+
-+class Robot(BaseModel):
-+    robot_name: str
-+    description: Optional[str] = None
-+    enabled: bool = True
-+    schedule: Optional[Schedule] = None
-+    on_failure: OnFailure = Field(default_factory=OnFailure)
-+    actions: List[Action]
-+
-+
-+# --- SQLAlchemy Models for Database Schema ---
-+
-+Base = declarative_base()
-+
-+class TaskRun(Base):
-+    __tablename__ = 'task_runs'
-+
-+    id: int = Column(Integer, primary_key=True, autoincrement=True)
-+    robot_name: str = Column(String, nullable=False)
-+    status: str = Column(SQLEnum('Pending', 'Running', 'Success', 'Failed', name='task_status_enum'), nullable=False)
-+    retry_count: int = Column(Integer, default=0, nullable=False)
-+    created_at: datetime.datetime = Column(DateTime, default=datetime.datetime.utcnow)
-+    started_at: Optional[datetime.datetime] = Column(DateTime, nullable=True)
-+    completed_at: Optional[datetime.datetime] = Column(DateTime, nullable=True)
-+    result_message: Optional[str] = Column(String, nullable=True)
-+
-+    logs = relationship("LogEntry", back_populates="task_run")
-+
-+class LogEntry(Base):
-+    __tablename__ = 'log_entries'
-+
-+    id: int = Column(Integer, primary_key=True, autoincrement=True)
-+    task_run_id: int = Column(Integer, ForeignKey('task_runs.id'), nullable=False)
-+    timestamp: datetime.datetime = Column(DateTime, default=datetime.datetime.utcnow)
-+    level: str = Column(SQLEnum('INFO', 'WARN', 'ERROR', name='log_level_enum'), nullable=False)
-+    message: str = Column(String, nullable=False)
-+    screenshot_path: Optional[str] = Column(String, nullable=True)
-+
-+    task_run = relationship("TaskRun", back_populates="logs")
-diff --git a/tests/.gitkeep b/tests/.gitkeep
-new file mode 100644
-index 0000000..e69de29
---- /dev/null
-+++ b/tests/.gitkeep
++            print(f"Failed to send email notification: {e}")
